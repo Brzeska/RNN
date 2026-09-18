@@ -5,9 +5,9 @@ import torch
 import torch.nn.functional as F
 
 
-train = True
+train = False
 print_loss = True
-sample = False
+sample = True
 print()
 
 #read in data
@@ -56,6 +56,8 @@ if train:
 
     bn_gain = torch.ones((1,n_hidden))
     bn_bias = torch.zeros((1,n_hidden))
+    bn_mean_running = torch.zeros((1,n_hidden))
+    bn_var_running = torch.ones((1,n_hidden))
     parameters = [C,W1,b1,W2,b2,bn_gain,bn_bias]
     
     #print(sum(p.nelement() for p in parameters))
@@ -83,8 +85,14 @@ for i in range(max_steps):
     #apply batch normalization to the preactivations
     #this formula is taken from Ioffe/Szegedy
     #you also need to scale and shift
-    hpreact = bn_gain*(hpreact - hpreact.mean(0, keepdim=True))/(hpreact.var(0, keepdim=True)+.001)**0.5 + bn_bias
-
+    bnmeani = hpreact.mean(0, keepdim=True)
+    bnvari = hpreact.var(0, keepdim=True)
+    hpreact = bn_gain*(hpreact - bnmeani)/(bnvari+.001)**0.5 + bn_bias
+    
+    with torch.no_grad():
+        bn_mean_running = 0.999*bn_mean_running + 0.001*bnmeani
+        bn_var_running = 0.999*bn_var_running + 0.001*bnvari
+    
     h = torch.tanh(hpreact)
     logits = h @ W2 + b2
     loss = F.cross_entropy(logits, Yb)
@@ -116,6 +124,10 @@ if train:
         'C': C,
         'W1': W1, 'b1': b1,
         'W2': W2, 'b2': b2,
+        'bn_gain': bn_gain,
+        'bn_bias': bn_bias,
+        'bn_mean_running': bn_mean_running,
+        'bn_var_running': bn_var_running
     }, 'MLP.pt')
 
 
@@ -126,6 +138,11 @@ b1 = model['b1']
 W2 = model['W2']
 b2 = model['b2']
 C = model['C']
+bn_gain = model['bn_gain']
+bn_bias = model['bn_bias']
+bn_mean_running = model['bn_mean_running']
+bn_var_running = model['bn_var_running']
+
 
 #@torch.no_grad() #since we're not training, stop tracking gradients
 with torch.no_grad():
@@ -133,7 +150,9 @@ with torch.no_grad():
     emb = C[X]
     emb_cat = emb.view(emb.shape[0],-1)
     hpreact = emb_cat @ W1 + b1
-    hpreact = bn_gain*(hpreact - hpreact.mean(0, keepdim=True))/(hpreact.var(0, keepdim=True)+.001)**0.5 + bn_bias
+    bnmeani = hpreact.mean(0, keepdim=True)
+    bnvari = hpreact.var(0, keepdim=True)
+    hpreact = bn_gain*(hpreact - bnmeani)/(bnvari+.001)**0.5 + bn_bias
     h = torch.tanh(hpreact)
     logits = h @ W2 + b2
     loss = F.cross_entropy(logits, Y)
@@ -161,7 +180,9 @@ with torch.no_grad():
     emb = C[X]
     emb_cat = emb.view(emb.shape[0],-1)
     hpreact = emb_cat @ W1 + b1
-    hpreact = bn_gain*(hpreact - hpreact.mean(0, keepdim=True))/(hpreact.var(0, keepdim=True)+.001)**0.5 + bn_bias
+    bnmeani = hpreact.mean(0, keepdim=True)
+    bnvari = hpreact.var(0, keepdim=True)
+    hpreact = bn_gain*(hpreact - bnmeani)/(bnvari+.001)**0.5 + bn_bias
     h = torch.tanh(hpreact)
     logits = h @ W2 + b2
     loss = F.cross_entropy(logits, Y)
@@ -178,10 +199,15 @@ with torch.no_grad():
         context = [0]*block_size
         while True:
             emb = C[torch.tensor([context])]
-            h = torch.tanh(emb.view(1,-1) @ W1 + b1)
+            emb_cat = emb.view(emb.shape[0],-1)
+            hpreact = emb_cat @ W1 + b1
+            hpreact = bn_gain*(hpreact - bn_mean_running)/(bn_var_running+.001)**0.5 + bn_bias
+
+            h = torch.tanh(hpreact)
+            
             logits = h @ W2 + b2
             probs = F.softmax(logits, dim=1)
-
+            
             ix = torch.multinomial(probs, num_samples=1).item()
 
             context = context[1:] + [ix]
